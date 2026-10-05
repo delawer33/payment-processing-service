@@ -41,6 +41,8 @@ class BrokerPublisher:
             exchange=EXCHANGE,
             message_id=message_id,
             content_type="application/json",
+            # Подтверждение брокера считается доставкой только для сохранённого на диск сообщения.
+            persist=True,
         )
 
 
@@ -52,9 +54,13 @@ async def handle_payment_created(message: PaymentCreated) -> None:
 @app.after_startup
 async def start() -> None:
     global _relay_task
-    await broker.declare_exchange(EXCHANGE)
-    for queue in (NEW_QUEUE, RETRY_QUEUE, DLQ_QUEUE):
-        await broker.declare_queue(queue)
+    exchange = await broker.declare_exchange(EXCHANGE)
+    await broker.declare_queue(NEW_QUEUE)
+    # Привязку payments.new делает подписчик; у retry и dlq подписчиков нет, привязываем здесь,
+    # иначе dead-letter и повторная публикация в payments уйдут в никуда (ADR 0004).
+    for queue in (RETRY_QUEUE, DLQ_QUEUE):
+        declared = await broker.declare_queue(queue)
+        await declared.bind(exchange, routing_key=queue.routing())
     _relay_task = asyncio.create_task(
         run_relay(get_sessionmaker(), BrokerPublisher(), settings.outbox_poll_interval)
     )
