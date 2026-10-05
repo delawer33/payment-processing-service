@@ -52,7 +52,7 @@
 | `payments/service.py` | `create_payment` (идемпотентность, outbox), `get_payment` |
 | `payments/router.py` | `POST /payments`, `GET /payments/{id}` |
 | `outbox/models.py` | модель `OutboxEvent` |
-| `outbox/relay.py` | `relay_once`, `run_relay`: перенос outbox в брокер |
+| `outbox/relay.py` | `relay_once`, `run_relay`: перенос outbox в брокер; событие неизвестного типа логируется и остаётся в outbox |
 | `messaging/schemas.py` | сообщение `PaymentCreated` |
 | `messaging/topology.py` | обменник, три очереди, `MAX_ATTEMPTS`, заголовок попытки |
 | `consumer/handler.py` | `process_payment`: шлюз, фиксация статуса, webhook |

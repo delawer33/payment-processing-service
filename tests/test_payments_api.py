@@ -68,6 +68,19 @@ async def test_same_idempotency_key_returns_same_payment(
     assert await count(engine, "outbox") == 1
 
 
+async def test_same_idempotency_key_with_equivalent_amount_returns_same_payment(
+    client: AsyncClient, engine: AsyncEngine
+) -> None:
+    h = headers("key-equivalent-amount")
+
+    first = await client.post("/api/v1/payments", json=BODY, headers=h)
+    second = await client.post("/api/v1/payments", json={**BODY, "amount": "100.5"}, headers=h)
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["payment_id"] == second.json()["payment_id"]
+    assert await count(engine, "payments") == 1
+
+
 async def test_same_idempotency_key_concurrent_requests_create_one_payment(
     client: AsyncClient, engine: AsyncEngine
 ) -> None:
@@ -151,6 +164,15 @@ async def test_get_payment_returns_details(client: AsyncClient) -> None:
 async def test_amount_must_be_positive_with_two_decimals(client: AsyncClient, amount: str) -> None:
     response = await client.post(
         "/api/v1/payments", json={**BODY, "amount": amount}, headers=headers()
+    )
+
+    assert response.status_code == 422
+
+
+async def test_amount_too_large_is_422(client: AsyncClient) -> None:
+    """NUMERIC(18,2) держит 16 цифр до запятой; больше — ошибка клиента, а не 500 из БД."""
+    response = await client.post(
+        "/api/v1/payments", json={**BODY, "amount": "1e16"}, headers=headers()
     )
 
     assert response.status_code == 422

@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PlainSerializer
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PlainSerializer, field_validator
 
 from payment_processing.payments.models import PaymentStatus
 
@@ -14,11 +14,19 @@ MoneyStr = Annotated[Decimal, PlainSerializer(lambda v: str(v), return_type=str,
 
 
 class PaymentCreate(BaseModel):
-    amount: Annotated[MoneyStr, Field(gt=0, decimal_places=2)]
+    # max_digits=18 — столбец NUMERIC(18,2): большее число БД не примет, лучше 422, чем 500.
+    amount: Annotated[MoneyStr, Field(gt=0, max_digits=18, decimal_places=2)]
     currency: Literal["RUB", "USD", "EUR"]
     description: str = Field(default="", max_length=255)
     metadata: dict[str, Any] = Field(default_factory=dict)
     webhook_url: HttpUrl
+
+    @field_validator("amount")
+    @classmethod
+    def _quantize_amount(cls, v: Decimal) -> Decimal:
+        # `100.5` и `100.50` — одна сумма; без квантования у них разный request_hash и повтор
+        # запроса с тем же ключом получил бы 409.
+        return v.quantize(Decimal("0.01"))
 
 
 class PaymentAccepted(BaseModel):

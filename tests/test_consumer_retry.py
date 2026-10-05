@@ -52,9 +52,10 @@ def republish(consumer_app: ModuleType, monkeypatch: pytest.MonkeyPatch) -> Asyn
 
 @pytest.fixture
 def spy_message(monkeypatch: pytest.MonkeyPatch) -> dict[str, AsyncMock]:
-    spies = {"ack": AsyncMock(), "reject": AsyncMock()}
+    spies = {"ack": AsyncMock(), "reject": AsyncMock(), "nack": AsyncMock()}
     monkeypatch.setattr(RabbitMessage, "ack", lambda self, *a, **kw: spies["ack"](*a, **kw))
     monkeypatch.setattr(RabbitMessage, "reject", lambda self, *a, **kw: spies["reject"](*a, **kw))
+    monkeypatch.setattr(RabbitMessage, "nack", lambda self, *a, **kw: spies["nack"](*a, **kw))
     return spies
 
 
@@ -90,7 +91,7 @@ async def test_failure_republishes_to_retry_with_backoff_and_incremented_attempt
 
     (kwargs,) = _retry_publishes(republish)
     assert kwargs["headers"] == {"x-attempt": next_attempt}
-    # Секунды: aio-pika переводит 1.0 в TTL 1000 мс на проводе.
+    # Секунды: aio-pika (encode_expiration_number) переводит 1.0 в TTL "1000" мс на проводе.
     assert kwargs["expiration"] == expiration
     spy_message["ack"].assert_awaited_once()
     spy_message["reject"].assert_not_awaited()
@@ -126,3 +127,27 @@ async def test_success_acks_without_republish(
     spy_message["ack"].assert_awaited_once()
     spy_message["reject"].assert_not_awaited()
     assert _retry_publishes(republish) == []
+
+
+async def test_retry_publish_failure_nacks_message_with_requeue(
+    test_broker: RabbitBroker,
+    consumer_app: ModuleType,
+    spy_message: dict[str, AsyncMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Упала сама публикация в retry: сообщение возвращается в очередь, а не висит без ответа."""
+    original = consumer_app.broker.publish
+
+    async def publish(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("queue") == RETRY_QUEUE:
+            raise ConnectionError("broker is down")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(consumer_app.broker, "publish", AsyncMock(side_effect=publish))
+    monkeypatch.setattr(consumer_app, "process_payment", AsyncMock(side_effect=RuntimeError))
+
+    await _deliver(test_broker, 0)
+
+    spy_message["nack"].assert_awaited_once_with(requeue=True)
+    spy_message["ack"].assert_not_awaited()
+    spy_message["reject"].assert_not_awaited()

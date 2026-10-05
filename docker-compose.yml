@@ -17,7 +17,8 @@ services:
     networks:
       - app_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "-H", "X-API-Key: ${API_KEY}", "http://localhost:${API_PORT_INTERNAL}/api/v1/health"]
+      # $$ — подстановку делает оболочка контейнера из его окружения, а не compose из оболочки хоста.
+      test: ["CMD-SHELL", "curl -fs -H \"X-API-Key: $$API_KEY\" http://localhost:$$API_PORT_INTERNAL/api/v1/health"]
       interval: 30s
       timeout: 5s
       retries: 5

@@ -1,4 +1,4 @@
-"""Relay outbox: публикация пачки, откат при ошибке, пропуск чужих блокировок."""
+"""Relay outbox: публикация пачки, откат при ошибке, пропуск блокировок и неизвестных типов."""
 
 import json
 import uuid
@@ -7,8 +7,11 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from payment_processing.outbox import relay
 from payment_processing.outbox.models import OutboxEvent
 from payment_processing.outbox.relay import relay_once
+
+BATCH = 100
 
 
 class FakePublisher:
@@ -57,7 +60,7 @@ async def test_relay_publishes_unpublished_events_and_marks_them(
     publisher = FakePublisher()
 
     async with sessionmaker() as session:
-        assert await relay_once(session, publisher) == 2
+        assert await relay_once(session, publisher, batch_size=BATCH) == 2
 
     assert [(json.loads(b), rk) for b, rk, _ in publisher.sent] == [
         ({"payment_id": ids[0]}, "payments.new"),
@@ -67,7 +70,7 @@ async def test_relay_publishes_unpublished_events_and_marks_them(
     assert await _published_flags(sessionmaker) == [True, True]
 
     async with sessionmaker() as session:
-        assert await relay_once(session, publisher) == 0
+        assert await relay_once(session, publisher, batch_size=BATCH) == 0
     assert len(publisher.sent) == 2
 
 
@@ -80,14 +83,14 @@ async def test_relay_marks_sent_only_after_publish_succeeds(
 
     async with sessionmaker() as session:
         with pytest.raises(ConnectionError):
-            await relay_once(session, failing)
+            await relay_once(session, failing, batch_size=BATCH)
 
     assert len(failing.sent) == 1
     assert await _published_flags(sessionmaker) == [False, False]
 
     healthy = FakePublisher()
     async with sessionmaker() as session:
-        assert await relay_once(session, healthy) == 2
+        assert await relay_once(session, healthy, batch_size=BATCH) == 2
     assert [m for _, _, m in healthy.sent] == ["1", "2"]
     assert await _published_flags(sessionmaker) == [True, True]
 
@@ -101,7 +104,31 @@ async def test_relay_skips_rows_locked_by_another_relay(
     async with sessionmaker() as holder:
         await holder.execute(text("SELECT id FROM outbox FOR UPDATE"))
         async with sessionmaker() as other:
-            assert await relay_once(other, publisher) == 0
+            assert await relay_once(other, publisher, batch_size=BATCH) == 0
 
     assert publisher.sent == []
     assert await _published_flags(sessionmaker) == [False]
+
+
+async def test_relay_skips_unknown_event_type_and_publishes_the_rest(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # fileConfig в migrations/env.py отключает уже созданные логгеры при программном upgrade.
+    monkeypatch.setattr(relay.logger, "disabled", False)
+    await _add_events(sessionmaker, 1)
+    async with sessionmaker() as session:
+        session.add(
+            OutboxEvent(aggregate_id=uuid.uuid4(), event_type="payment.unknown", payload={})
+        )
+        await session.commit()
+    await _add_events(sessionmaker, 1)
+    publisher = FakePublisher()
+
+    async with sessionmaker() as session:
+        assert await relay_once(session, publisher, batch_size=BATCH) == 2
+
+    assert [m for _, _, m in publisher.sent] == ["1", "3"]
+    assert await _published_flags(sessionmaker) == [True, False, True]
+    assert "payment.unknown" in caplog.text

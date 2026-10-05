@@ -1,5 +1,6 @@
 """Доставка webhook: подписанный POST с итоговым статусом платежа."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -39,13 +40,20 @@ async def deliver(client: httpx.AsyncClient, payment: Payment) -> None:
         "X-Signature": sign(settings.webhook_secret, body),
     }
     try:
-        response = await client.post(
-            payment.webhook_url,
-            content=body,
-            headers=headers,
-            timeout=settings.webhook_timeout,
-        )
+        # Таймаут httpx ограничивает каждую фазу (connect, read...) отдельно; медленно капающий
+        # ответ уложится в каждую и растянет доставку. Общий дедлайн держит prefetch-слот в рамках.
+        async with asyncio.timeout(settings.webhook_timeout):
+            response = await client.post(
+                payment.webhook_url,
+                content=body,
+                headers=headers,
+                timeout=settings.webhook_timeout,
+            )
     except httpx.HTTPError as exc:
         raise WebhookDeliveryError(f"webhook {payment.webhook_url} unreachable: {exc!r}") from exc
+    except TimeoutError as exc:
+        raise WebhookDeliveryError(
+            f"webhook {payment.webhook_url} timed out after {settings.webhook_timeout}s"
+        ) from exc
     if not response.is_success:
         raise WebhookDeliveryError(f"webhook {payment.webhook_url} answered {response.status_code}")

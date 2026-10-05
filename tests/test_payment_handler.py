@@ -11,6 +11,7 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from payment_processing.config import get_settings
 from payment_processing.consumer.handler import process_payment
 from payment_processing.gateway import GatewayResult
 from payment_processing.payments.models import Payment, PaymentStatus
@@ -220,6 +221,28 @@ async def test_webhook_network_error_raises_delivery_error(
         await process_payment(
             payment_id, sessionmaker=sessionmaker, gateway=FakeGateway(), http=client
         )
+
+
+async def test_webhook_overall_deadline_raises_delivery_error(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Дедлайн общий на весь вызов, а не только на фазы httpx."""
+    monkeypatch.setenv("WEBHOOK_TIMEOUT", "0.1")
+    get_settings.cache_clear()
+
+    async def stall(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        return httpx.Response(200)
+
+    payment_id = await _add_payment(sessionmaker)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(stall))
+
+    with pytest.raises(WebhookDeliveryError, match="timed out"):
+        await process_payment(
+            payment_id, sessionmaker=sessionmaker, gateway=FakeGateway(), http=client
+        )
+
+    assert (await _load(sessionmaker, payment_id)).webhook_delivered_at is None
 
 
 async def test_gateway_transport_error_keeps_pending(
