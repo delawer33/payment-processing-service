@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # No default on purpose: a missing URL must fail loudly, not fall back to a local guess.
     database_url: str
     rabbitmq_url: str
+    outbox_poll_interval: float = 0.5
+    outbox_batch_size: int = 100
     # Static key clients send in `X-API-Key`; no default so an unset key cannot open the API.
     api_key: str
 
