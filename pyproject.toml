@@ -1,0 +1,70 @@
+[project]
+name = "payment-processing"
+version = "0.1.0"
+description = "Асинхронный сервис процессинга платежей: приём платежей по API, обработка через платёжный шлюз в consumer, webhook-уведомления, outbox и DLQ"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "faststream[rabbit]>=0.5.33",
+    "httpx>=0.28",
+]
+
+[dependency-groups]
+dev = [
+    # ruff >= 0.16: the default rule set grew from ~60 to ~400 rules (B, UP, SIM, C4,
+    # RUF, PL subset, ASYNC, ...). Config below extends those defaults instead of
+    # re-listing them.
+    "ruff>=0.16",
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "pre-commit>=4.0",
+    "testcontainers[postgres,rabbitmq]>=4.9",
+    "asyncpg-stubs>=0.31",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/payment_processing"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+extend-select = [
+    "I",    # isort
+    "PTH",  # pathlib over os.path
+    "TC",   # type-checking-only imports
+    "RET",  # return consistency
+    "ISC",  # implicit string concatenation
+    "TID",  # tidy imports (no relative parent imports)
+    "PT",   # pytest style
+    "ARG",  # unused arguments
+]
+# Prose in this repo may be Cyrillic; those are not "ambiguous unicode" characters.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "ARG"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests", "migrations"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

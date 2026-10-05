@@ -1,0 +1,22 @@
+# env — only the example is committed
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+
+# ide / os
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json
