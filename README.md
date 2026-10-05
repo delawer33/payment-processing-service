@@ -175,7 +175,7 @@ payments.dlq	1
 
 ```bash
 uv sync
-uv run pytest                      # 37 тестов
+uv run pytest                      # 42 теста
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
