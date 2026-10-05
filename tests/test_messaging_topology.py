@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from faststream.rabbit import RabbitQueue, TestRabbitBroker
@@ -18,9 +19,13 @@ from payment_processing.messaging.topology import (
 
 
 @pytest.mark.usefixtures("database_url")
-async def test_topology_declares_three_queues_with_dlx_arguments() -> None:
+async def test_topology_declares_three_queues_with_dlx_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from payment_processing.consumer.app import broker, handle_payment_created
 
+    monkeypatch.setattr("payment_processing.consumer.app.process_payment", AsyncMock())
+    monkeypatch.setattr("payment_processing.consumer.app._deps", MagicMock(), raising=False)
     assert EXCHANGE.name == "payments"
     assert (
         NEW_QUEUE.arguments.items()
@@ -53,8 +58,6 @@ async def test_topology_declares_three_queues_with_dlx_arguments() -> None:
 async def test_start_binds_retry_and_dlq_queues_to_exchange(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
     from payment_processing.consumer import app as consumer_app
 
     exchange_obj = MagicMock()
@@ -81,8 +84,6 @@ async def test_start_binds_retry_and_dlq_queues_to_exchange(
 
 
 async def test_publisher_sends_persistent_messages(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import AsyncMock
-
     from payment_processing.consumer import app as consumer_app
 
     publish = AsyncMock()

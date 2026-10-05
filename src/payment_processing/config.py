@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     outbox_batch_size: int = 100
     # Static key clients send in `X-API-Key`; no default so an unset key cannot open the API.
     api_key: str
+    gateway_delay_min: float = 2.0
+    gateway_delay_max: float = 5.0
+    gateway_success_rate: float = 0.9
+    # Ключ подписи webhook (`X-Signature`); дефолт годится только для локального запуска.
+    webhook_secret: str = "change-me"
+    webhook_timeout: float = 5.0
+    # Задержка перед первым повтором, секунды; каждая следующая вдвое больше (ADR 0004).
+    retry_base_delay: float = 1.0
+    # Сколько сообщений consumer держит в работе одновременно; каждое занимает соединение с БД.
+    consumer_prefetch: int = 10
 
 
 @lru_cache
