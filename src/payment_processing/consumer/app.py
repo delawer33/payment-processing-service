@@ -28,6 +28,10 @@ from payment_processing.outbox.relay import run_relay
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
+# Без этого INFO-записи приложения (попытки, retry, DLQ) не попадают в `docker compose logs`.
+logging.basicConfig(
+    level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+)
 # Подтверждения публикации включены явно: relay ставит published_at только после ack брокера.
 # on_return_raises: сообщение без маршрута (mandatory) не должно считаться отправленным.
 broker = RabbitBroker(
