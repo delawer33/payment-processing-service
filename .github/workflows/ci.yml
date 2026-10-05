@@ -36,8 +36,8 @@ jobs:
       - name: mypy --strict
         run: uv run mypy
       - name: pytest
-        # exit 5 = no tests collected; fine until the first slice brings the first test.
-        run: uv run pytest || [ $? -eq 5 ]
+        # testcontainers поднимает Postgres через Docker, который есть на ubuntu-latest.
+        run: uv run pytest
 
   image:
     runs-on: ubuntu-latest
@@ -48,4 +48,5 @@ jobs:
       - name: .env from example
         run: cp .env.example .env
       - run: docker compose config -q
+      - run: docker compose --profile demo config -q
       - run: docker compose build

@@ -16,7 +16,7 @@ uv run mypy                      # strict; конфиг в pyproject.toml
 uv run uvicorn payment_processing.main:app --reload --port 8000   # или preview "api" из .claude/launch.json
 uv run faststream run payment_processing.consumer.app:app         # consumer, второй процесс
 uv run pre-commit install        # один раз на клон
-docker compose up --build        # нужен .env (cp .env.example .env)
+docker compose up --build        # нужен .env (cp .env.example .env); --profile demo добавляет webhook-sink
 ```
 
 ## Структура

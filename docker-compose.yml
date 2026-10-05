@@ -2,21 +2,23 @@ services:
   api:
     container_name: payment-processing_api
     build: .
+    image: payment-processing:local
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT_INTERNAL}/${POSTGRES_DB}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:${RABBITMQ_PORT_INTERNAL}/
     depends_on:
-      db:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${API_PORT_EXTERNAL}:${API_PORT_INTERNAL}"
     networks:
       - app_network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${API_PORT_INTERNAL}/api/v1/health"]
+      # $$ — подстановку делает оболочка контейнера из его окружения, а не compose из оболочки хоста.
+      test: ["CMD-SHELL", "curl -fs -H \"X-API-Key: $$API_KEY\" http://localhost:$$API_PORT_INTERNAL/api/v1/health"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -25,6 +27,7 @@ services:
   consumer:
     container_name: payment-processing_consumer
     build: .
+    image: payment-processing:local
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT_INTERNAL}/${POSTGRES_DB}
@@ -32,10 +35,38 @@ services:
     # Same image as the API; only the entrypoint differs.
     command: ["faststream", "run", "payment_processing.consumer.app:app"]
     depends_on:
-      db:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - app_network
+
+  # Одноразовый сервис: применяет схему и завершается (ADR 0005). api и consumer ждут его успеха.
+  migrate:
+    container_name: payment-processing_migrate
+    build: .
+    image: payment-processing:local
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT_INTERNAL}/${POSTGRES_DB}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - app_network
+
+  # Приёмник webhook для демо: `docker compose --profile demo up`.
+  webhook-sink:
+    container_name: payment-processing_webhook-sink
+    profiles: ["demo"]
+    image: python:3.13-slim
+    environment:
+      WEBHOOK_SINK_FAIL_FIRST: ${WEBHOOK_SINK_FAIL_FIRST:-0}
+    command: ["python", "/app/webhook_sink.py"]
+    volumes:
+      - ./scripts/webhook_sink.py:/app/webhook_sink.py:ro
     networks:
       - app_network
 
