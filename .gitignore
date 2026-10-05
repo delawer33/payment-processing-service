@@ -20,5 +20,3 @@ dist/
 .idea/
 .vscode/
 .claude/settings.local.json
-.scratch/
-.orchestrate/
