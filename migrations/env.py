@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from payment_processing.config import get_settings
 from payment_processing.db import Base
+from payment_processing.outbox import models as outbox_models  # noqa: F401
+from payment_processing.payments import models as payments_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:
