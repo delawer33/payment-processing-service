@@ -6,7 +6,18 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, Numeric, String, Text, func, text
+from sqlalchemy import (
+    CHAR,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +33,7 @@ class PaymentStatus(enum.StrEnum):
 class Payment(Base):
     __tablename__ = "payments"
     __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_payments_idempotency_key"),
         CheckConstraint("amount > 0", name="ck_payments_amount_positive"),
         CheckConstraint("currency IN ('RUB','USD','EUR')", name="ck_payments_currency"),
     )
@@ -42,8 +54,8 @@ class Payment(Base):
         default=PaymentStatus.PENDING,
         server_default=PaymentStatus.PENDING.value,
     )
-    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
-    request_hash: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    request_hash: Mapped[str] = mapped_column(CHAR(64))
     webhook_url: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
