@@ -14,8 +14,8 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Поднимаются `db` (Postgres), `rabbitmq`, одноразовый `migrate` (применяет схему и завершается),
-затем `api` (порт `8000`) и `consumer`. Все ручки под `/api/v1` требуют заголовок `X-API-Key`
+Поднимаются `db` (Postgres), `rabbitmq`, `redis` (счётчики rate limit), одноразовый `migrate`
+(применяет схему и завершается), затем `api` (порт `8000`) и `consumer`. Все ручки под `/api/v1` требуют заголовок `X-API-Key`
 со значением `API_KEY` из `.env`.
 
 ```bash
@@ -54,8 +54,15 @@ docker compose --profile demo up --build -d --wait
 | `WEBHOOK_TIMEOUT` | таймаут исходящего webhook, секунды | `5.0` |
 | `RETRY_BASE_DELAY` | задержка перед первым повтором, секунды; каждая следующая вдвое больше | `1.0` |
 | `CONSUMER_PREFETCH` | сколько сообщений consumer держит в работе одновременно | `10` |
+| `REDIS_URL` | URL Redis для rate limit; в compose `redis://redis:6379/0` | нет |
+| `REDIS_TIMEOUT` | таймаут операции и ожидания соединения из пула Redis, секунды | `0.5` |
+| `REDIS_MAX_CONNECTIONS` | размер пула соединений с Redis на процесс API | `50` |
+| `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_WINDOW` | лимит запросов к `/payments` на API-ключ за окно в секундах | `100`, `1` |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | пул соединений SQLAlchemy на процесс | `20`, `10` |
+| `CONSUMER_METRICS_PORT` | порт `/metrics` процесса consumer | `9100` |
 | `WEBHOOK_SINK_FAIL_FIRST` | только demo: первые N запросов к `webhook-sink` получают 500 | `0` |
 | `POSTGRES_*`, `RABBITMQ_*`, `API_PORT_*` | пользователи, пароли и порты контейнеров, см. `.env.example` | |
+| `PROMETHEUS_PORT_EXTERNAL`, `GRAFANA_PORT_EXTERNAL`, `GRAFANA_ADMIN_PASSWORD` | только compose, profile `monitoring` | `9090`, `3000`, `change-me` |
 
 ## Сценарии
 
@@ -171,16 +178,141 @@ payments.dlq	1
 Платёж в БД при этом уже `succeeded` или `failed`, не доставлен только webhook
 (`webhook_delivered_at` равен `null`). Разбор DLQ ручной, см. «Сознательные упрощения».
 
+### Rate limit
+
+На `/api/v1/payments` действует лимит `RATE_LIMIT_REQUESTS` запросов за `RATE_LIMIT_WINDOW`
+секунд на API-ключ. Счётчик лежит в Redis и общий для всех реплик API
+([ADR 0006](docs/adr/0006-rate-limit-fixed-window-redis-fail-open.md)). В пределах лимита
+ответ несёт остаток квоты:
+
+```
+HTTP/1.1 202 Accepted
+x-ratelimit-limit: 100
+x-ratelimit-remaining: 99
+```
+
+Сверх лимита — `429` с `Retry-After` до конца текущего окна:
+
+```
+HTTP/1.1 429 Too Many Requests
+retry-after: 1
+
+{"detail":"rate limit of 100 requests per 1s exceeded"}
+```
+
+Если Redis недоступен, запрос проходит без лимита: в лог пишется предупреждение, растёт
+`rate_limit_backend_errors_total`.
+
+## Мониторинг
+
+```bash
+docker compose --profile monitoring up --build -d --wait
+```
+
+Добавляет Prometheus (`localhost:9090`) и Grafana (`localhost:3000`, без логина, только
+чтение; admin — пароль `GRAFANA_ADMIN_PASSWORD`). Дашборд «Payment Processing» открывается
+домашней страницей и собирается из `monitoring/`, ничего настраивать руками не нужно.
+
+Prometheus собирает три источника:
+
+| Источник | Адрес в сети compose | Что там |
+|---|---|---|
+| api | `api:8000/metrics` | запросы по маршруту и статусу, латентность, исход создания платежа (`created`, `replayed`, `conflict`), отказы rate limit и ошибки Redis |
+| consumer | `consumer:9100/metrics` | терминальные статусы, латентность шлюза, доставка webhook, исход сообщений (`acked`, `retried`, `dead_lettered`, `requeued`), публикации outbox и возраст старейшего неопубликованного события |
+| RabbitMQ | `rabbitmq:15692/metrics/per-object` | встроенный плагин `rabbitmq_prometheus`: глубина `payments.new`, `payments.retry`, `payments.dlq` |
+
+`/metrics` API отдаётся без `X-API-Key` и наружу в проде не публикуется: его читает только
+Prometheus изнутри кластера.
+
+На дашборде три ряда. «Сводка» показывает приём в rps, p95 `POST /payments`, долю отказов шлюза,
+глубину `payments.new`, DLQ и возраст outbox. «API» — маршруты, латентность, исходы и rate limit.
+«Обработка» — шлюз, webhook, исходы сообщений, очереди и outbox.
+
+## Kubernetes
+
+Манифесты — `k8s/`, kustomize:
+
+- `k8s/base/` — сам сервис: `ConfigMap`, Job `migrate`, Deployment `api` (2 реплики, `Service`,
+  `HorizontalPodAutoscaler` 2–6 по CPU, `PodDisruptionBudget`) и Deployment `consumer` (2 реплики).
+  Секреты берутся из Secret `payment-processing`.
+- `k8s/overlays/kind/` — локальный стенд: namespace, Postgres, RabbitMQ и Redis внутри кластера,
+  Secret из `secrets.env`.
+
+```bash
+docker compose build api
+kind create cluster --name pps
+kind load docker-image payment-processing:local --name pps
+cp k8s/overlays/kind/secrets.env.example k8s/overlays/kind/secrets.env   # поменяйте change-me
+kubectl apply -k k8s/overlays/kind
+kubectl -n payment-processing wait --for=condition=complete job/migrate --timeout=180s
+kubectl -n payment-processing port-forward svc/api 8000:80
+```
+
+Схему применяет Job `migrate` (ADR 0005). Поды `api` и `consumer` в init-контейнере ждут, пока
+`alembic current` покажет `(head)`, поэтому порядок `apply` не важен. Job неизменяем: перед
+выкаткой новой версии старый удаляют (`kubectl -n payment-processing delete job migrate`).
+HPA нужен metrics-server; в kind его нет, без него автомасштаб не сработает, а остальное работает.
+
+Для прода overlay `kind` заменяется своим: управляемые Postgres, RabbitMQ и Redis, Secret из
+хранилища секретов, образ из registry.
+
+Манифесты проверены `kubectl apply --dry-run=server` на кластере kind v0.31: API-сервер
+принимает все объекты. Полный запуск подов в kind не прогонялся.
+
+## Нагрузочный прогон
+
+```bash
+RATE_LIMIT_REQUESTS=1000000 docker compose up --build -d --wait   # лимит не мешает замеру
+RATE=100 DURATION=60s docker compose --profile loadtest run --rm k6 run /scripts/payments.js
+```
+
+Сценарий `loadtest/payments.js` (k6, `constant-arrival-rate`) шлёт `POST /payments` с
+постоянной частотой `RATE`. Ключи идемпотентности уникальны, 10% запросов повторяют
+предыдущий ключ. Ожидаемые ответы — `202` и `429`. Замеряется приём, `webhook-sink` в прогоне не
+нужен: недоставленные webhook уходят в повторы и DLQ, на приём это не влияет.
+
+Стенд: ноутбук (i5-12500H, 16 потоков), compose целиком на нём же, API — один процесс uvicorn,
+consumer — один процесс. Каждый прогон длится 60 с.
+
+| Целевой rps | Принято, rps | Ошибки | p50 | p95 | p99 |
+|---|---|---|---|---|---|
+| 50 | 50.0 | 0 | 6 мс | 20 мс | 43 мс |
+| 100 | 100.0 | 0 | 7 мс | 148 мс | 639 мс |
+| 150 | 142.9 | 0, k6 не успел отправить 424 итерации | 345 мс | 4.1 с | 7.6 с |
+| 250 | 184.2 | 0, k6 не успел отправить 2977 итераций | 4.1 с | 8.9 с | 11.1 с |
+
+С лимитом по умолчанию (100 за 1 с) и нагрузкой 150 rps за 30 с принято 3003 запроса, ровно
+100 в секунду. Ещё 1498 получили `429`. p50 — 4.7 мс, p95 — 196 мс.
+
+Выводы:
+
+- **Один процесс API держит около 140–180 `POST /payments` в секунду**, дальше растёт очередь и
+  латентность. Упирается в CPU процесса. По профилю (py-spy) ~30% занимает ORM SQLAlchemy, ~24% —
+  разрешение зависимостей FastAPI, ~9% — rate limit. Postgres не узкое место: pgbench на том же
+  стенде дал ~11 тыс. tps. Масштабируется числом процессов: реплики в k8s, HPA по CPU.
+- **Consumer обрабатывает ~2.8 платежа в секунду**, это prefetch 10, делённый на среднюю задержку
+  эмуляции шлюза (2–5 с, медиана 3.6 с). Во время прогона очередь `payments.new` выросла до
+  ~36.5 тыс. сообщений, при этом возраст outbox оставался нулевым: relay успевает. Пропускная
+  способность consumer задаётся шлюзом и масштабируется `CONSUMER_PREFETCH` и числом реплик.
+- **Дескрипторы.** До `ulimits nofile` в compose при 250 rps 19.5% запросов падали с 500: под
+  перегрузкой сокеты клиентов занимали лимит Docker в 1024 дескриптора, и новое соединение с
+  БД получало «Too many open files». С лимитом 65536 ошибок нет.
+- **Пул Redis.** Обычный пул redis-py сверх `max_connections` сразу бросает ошибку, и под
+  нагрузкой rate limit молча отключался бы (fail open). Поэтому пул блокирующий, это покрыто
+  тестом на 300 одновременных запросов.
+
+Во время прогона дашборд Grafana показывает то же самое: приём в rps, p95, рост `payments.new`.
+
 ## Тесты
 
 ```bash
 uv sync
-uv run pytest                      # 42 теста
+uv run pytest                      # 61 тест
 uv run ruff check . && uv run ruff format --check . && uv run mypy
 ```
 
-Тестам нужен Docker: Postgres поднимается через testcontainers, RabbitMQ в тестах — in-memory
-`TestRabbitBroker`. Миграции в тестах применяет тот же `alembic upgrade head`.
+Тестам нужен Docker: Postgres и Redis поднимаются через testcontainers, RabbitMQ в тестах —
+in-memory `TestRabbitBroker`. Миграции в тестах применяет тот же `alembic upgrade head`.
 
 ## Как это устроено
 
@@ -197,6 +329,8 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
   ([ADR 0004](docs/adr/0004-retry-via-ttl-queue-and-dlq.md)).
 - Один образ, два процесса; схему применяет сервис `migrate`
   ([ADR 0005](docs/adr/0005-one-image-two-processes-migrate-job.md)).
+- Rate limit — фиксированное окно в Redis на API-ключ; без Redis запрос проходит
+  ([ADR 0006](docs/adr/0006-rate-limit-fixed-window-redis-fail-open.md)).
 
 ## Сознательные упрощения
 
@@ -204,11 +338,12 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
   В проде у вызова шлюза был бы жёсткий таймаут, а при серии сбоев — размыкание цепи.
 - **Один API-ключ** на весь сервис. В проде — ключи по клиентам с ротацией и привязкой платежей
   к клиенту.
-- **DLQ разбирается вручную.** Сообщения из `payments.dlq` никто не читает; в проде нужны алерт
-  на непустую очередь и инструмент переотправки.
+- **DLQ разбирается вручную.** Сообщения из `payments.dlq` никто не читает. Глубина DLQ видна на
+  дашборде, но правил алертов нет; в проде нужны алерт на непустую очередь и инструмент
+  переотправки.
 - **Relay живёт в процессе consumer**, а не отдельным процессом. Несколько consumer безопасны
   (`SKIP LOCKED`), но публикация и обработка делят ресурсы. В проде relay выносится отдельно.
 - **Опрос outbox вместо LISTEN/NOTIFY.** Простая схема с задержкой до `OUTBOX_POLL_INTERVAL`
   и постоянной лёгкой нагрузкой на БД; после полной пачки relay берёт следующую без паузы. В проде — LISTEN/NOTIFY с опросом как страховкой.
-- **Нет rate limit и метрик.** В проде — лимиты на клиента и метрики (глубина очередей, возраст
-  непубликованных событий outbox, доля отказов шлюза, длина DLQ).
+- **Нет алертов и трейсинга.** Метрики и дашборд есть, Alertmanager и правила — нет; в проде —
+  алерты на DLQ, возраст outbox, долю отказов шлюза и ошибки Redis, плюс трейсы OpenTelemetry.

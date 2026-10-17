@@ -50,4 +50,10 @@ jobs:
         run: cp .env.example .env
       - run: docker compose config -q
       - run: docker compose --profile demo config -q
+      - run: docker compose --profile monitoring --profile loadtest config -q
+      - name: kustomize render
+        # kubectl есть на ubuntu-latest; secrets.env не коммитится, рендер берёт пример.
+        run: |
+          cp k8s/overlays/kind/secrets.env.example k8s/overlays/kind/secrets.env
+          kubectl kustomize k8s/overlays/kind > /dev/null
       - run: docker compose build
