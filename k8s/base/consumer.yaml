@@ -1,0 +1,58 @@
+# Тот же образ, другая команда (ADR 0005). Несколько реплик безопасны: relay берёт outbox
+# через SKIP LOCKED, обработчик блокирует строку платежа (ADR 0001, 0003).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: consumer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      # Обработчики в работе дожидаются конца при остановке (graceful_timeout FastStream);
+      # шлюз отвечает до 5 с, плюс webhook.
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: wait-for-schema
+          image: payment-processing:local
+          command: ["sh", "-c", "until alembic current 2>/dev/null | grep -q '(head)'; do echo waiting for schema; sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 96Mi }
+            limits: { memory: 192Mi }
+      containers:
+        - name: consumer
+          image: payment-processing:local
+          command: ["faststream", "run", "payment_processing.consumer.app:app"]
+          ports:
+            - { name: metrics, containerPort: 9100 }
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          # Сервер метрик поднимается в after_startup, после подключения к брокеру: отвечает —
+          # значит, процесс стартовал.
+          readinessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 160Mi }
+            limits: { memory: 320Mi }

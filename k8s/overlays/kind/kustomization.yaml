@@ -1,0 +1,19 @@
+# Локальный кластер kind: приложение из base плюс одноузловые Postgres, RabbitMQ и Redis.
+#   cp k8s/overlays/kind/secrets.env.example k8s/overlays/kind/secrets.env
+#   kubectl apply -k k8s/overlays/kind
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: payment-processing
+resources:
+  - namespace.yaml
+  - ../../base
+  - postgres.yaml
+  - rabbitmq.yaml
+  - redis.yaml
+secretGenerator:
+  # secrets.env не коммитится (как .env); шаблон — secrets.env.example.
+  - name: payment-processing
+    envs: [secrets.env]
+generatorOptions:
+  # Без хеша в имени: на Secret ссылаются и base, и инфраструктура overlay.
+  disableNameSuffixHash: true

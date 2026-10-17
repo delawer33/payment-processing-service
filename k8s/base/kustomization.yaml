@@ -1,0 +1,13 @@
+# Приложение без инфраструктуры: Postgres, RabbitMQ и Redis приходят снаружи (в проде —
+# управляемые сервисы), адреса и ключи — из Secret `payment-processing`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: payment-processing
+    includeSelectors: false
+resources:
+  - configmap.yaml
+  - migrate-job.yaml
+  - api.yaml
+  - consumer.yaml
