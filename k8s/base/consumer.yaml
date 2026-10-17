@@ -34,6 +34,27 @@ spec:
           resources:
             requests: { cpu: 10m, memory: 96Mi }
             limits: { memory: 192Mi }
+        # Как depends_on в compose: без брокера consumer падает на старте и уходит в CrashLoop.
+        - name: wait-for-broker
+          image: payment-processing:local
+          command:
+            - python
+            - -c
+            - |
+              import os, socket, time, urllib.parse
+              url = urllib.parse.urlparse(os.environ["RABBITMQ_URL"])
+              while True:
+                  try:
+                      socket.create_connection((url.hostname, url.port or 5672), timeout=2).close()
+                      break
+                  except OSError as exc:
+                      print(f"waiting for broker: {exc}", flush=True)
+                      time.sleep(2)
+          envFrom:
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 128Mi }
       containers:
         - name: consumer
           image: payment-processing:local

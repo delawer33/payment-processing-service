@@ -17,6 +17,9 @@ spec:
         prometheus.io/port: "15692"
         prometheus.io/path: /metrics/per-object
     spec:
+      # Сразу от пользователя rabbitmq образа: при старте от root entrypoint на свежем томе
+      # не успевает выставить права на .erlang.cookie, и первый запуск падает с eacces.
+      securityContext: { runAsUser: 100, runAsGroup: 101, fsGroup: 101 }
       containers:
         - name: rabbitmq
           image: rabbitmq:4-management-alpine

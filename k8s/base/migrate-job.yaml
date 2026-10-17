@@ -17,6 +17,18 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      initContainers:
+        # Ждёт, пока база примет соединение: иначе попытки Job уходят на «БД ещё не поднялась»,
+        # а backoff между ними растёт до минут.
+        - name: wait-for-db
+          image: payment-processing:local
+          command: ["sh", "-c", "until out=$(alembic current 2>&1); do echo \"waiting for database: $(echo \"$out\" | tail -n 1)\"; sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 96Mi }
+            limits: { memory: 192Mi }
       containers:
         - name: migrate
           image: payment-processing:local
