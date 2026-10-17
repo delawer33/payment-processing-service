@@ -6,11 +6,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from payment_processing import metrics
 from payment_processing.db import get_session
 from payment_processing.payments import service
 from payment_processing.payments.schemas import PaymentAccepted, PaymentCreate, PaymentDetails
+from payment_processing.ratelimit import enforce_rate_limit
 
-router = APIRouter(prefix="/payments", tags=["payments"])
+router = APIRouter(
+    prefix="/payments", tags=["payments"], dependencies=[Depends(enforce_rate_limit)]
+)
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
@@ -22,11 +26,13 @@ async def create_payment(
     idempotency_key: Annotated[str, Header(min_length=1, max_length=255)],
 ) -> PaymentAccepted:
     try:
-        payment, _ = await service.create_payment(
+        payment, created = await service.create_payment(
             session, idempotency_key=idempotency_key, data=data
         )
     except service.IdempotencyConflict as exc:
+        metrics.PAYMENTS_ACCEPTED.labels("conflict").inc()
         raise HTTPException(status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    metrics.PAYMENTS_ACCEPTED.labels("created" if created else "replayed").inc()
     return PaymentAccepted(
         payment_id=payment.id, status=payment.status, created_at=payment.created_at
     )

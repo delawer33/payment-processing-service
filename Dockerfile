@@ -36,4 +36,6 @@ USER app
 ENV API_PORT_INTERNAL=8000
 
 # The service command lives here and only here (compose does not repeat it).
-CMD ["sh", "-c", "uvicorn payment_processing.main:app --host 0.0.0.0 --port ${API_PORT_INTERNAL}"]
+# exec: uvicorn становится PID 1 и сам получает SIGTERM; иначе sh его не передаёт, и остановка
+# ждёт grace period до SIGKILL с оборванными запросами.
+CMD ["sh", "-c", "exec uvicorn payment_processing.main:app --host 0.0.0.0 --port ${API_PORT_INTERNAL}"]

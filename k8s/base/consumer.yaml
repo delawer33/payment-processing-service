@@ -1,0 +1,84 @@
+# Тот же образ, другая команда (ADR 0005). Несколько реплик безопасны: relay берёт outbox
+# через SKIP LOCKED, обработчик блокирует строку платежа (ADR 0001, 0003).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consumer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: consumer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: consumer
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      # Обработчики в работе дожидаются конца при остановке (graceful_timeout FastStream);
+      # шлюз отвечает до 5 с, плюс webhook.
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: wait-for-schema
+          image: payment-processing:local
+          command: ["sh", "-c", "until out=$(alembic current 2>&1) && echo \"$out\" | grep -q '(head)'; do echo \"waiting for schema: $(echo \"$out\" | tail -n 1)\"; sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 96Mi }
+            limits: { memory: 192Mi }
+        # Как depends_on в compose: без брокера consumer падает на старте и уходит в CrashLoop.
+        - name: wait-for-broker
+          image: payment-processing:local
+          command:
+            - python
+            - -c
+            - |
+              import os, socket, time, urllib.parse
+              url = urllib.parse.urlparse(os.environ["RABBITMQ_URL"])
+              while True:
+                  try:
+                      socket.create_connection((url.hostname, url.port or 5672), timeout=2).close()
+                      break
+                  except OSError as exc:
+                      print(f"waiting for broker: {exc}", flush=True)
+                      time.sleep(2)
+          envFrom:
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 128Mi }
+      containers:
+        - name: consumer
+          image: payment-processing:local
+          command: ["faststream", "run", "payment_processing.consumer.app:app"]
+          ports:
+            - { name: metrics, containerPort: 9100 }
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          env:
+            # Соединение на каждое сообщение в работе (CONSUMER_PREFETCH) плюс relay; без overflow.
+            - { name: DB_POOL_SIZE, value: "12" }
+            - { name: DB_MAX_OVERFLOW, value: "0" }
+          # Сервер метрик поднимается в after_startup, после подключения к брокеру: отвечает —
+          # значит, процесс стартовал. Он живёт в своём потоке, поэтому зависший event loop или
+          # потерянное соединение с брокером проба не видит; это видно по метрикам очередей.
+          readinessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 160Mi }
+            limits: { memory: 320Mi }

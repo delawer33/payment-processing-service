@@ -14,6 +14,8 @@ dependencies = [
     "alembic>=1.14",
     "faststream[rabbit,cli]>=0.5.33",
     "httpx>=0.28",
+    "redis>=5.2",
+    "prometheus-client>=0.21",
 ]
 
 [dependency-groups]
@@ -26,7 +28,7 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
     "pre-commit>=4.0",
-    "testcontainers[postgres,rabbitmq]>=4.9",
+    "testcontainers[postgres,rabbitmq,redis]>=4.9",
     "asyncpg-stubs>=0.31",
 ]
 

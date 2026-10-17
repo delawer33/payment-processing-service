@@ -7,13 +7,22 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT_INTERNAL}/${POSTGRES_DB}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:${RABBITMQ_PORT_INTERNAL}/
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-100}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1}
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
     ports:
       - "${API_PORT_EXTERNAL}:${API_PORT_INTERNAL}"
+    # Дефолт Docker — 1024 дескриптора: при перегрузке сокеты клиентов съедают их, и новое
+    # соединение с БД падает с «Too many open files» (видно в нагрузочном прогоне, README).
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
     networks:
       - app_network
     healthcheck:
@@ -32,8 +41,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT_INTERNAL}/${POSTGRES_DB}
       RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:${RABBITMQ_PORT_INTERNAL}/
+      REDIS_URL: redis://redis:6379/0
     # Same image as the API; only the entrypoint differs.
     command: ["faststream", "run", "payment_processing.consumer.app:app"]
+    # /metrics на CONSUMER_METRICS_PORT (9100) читает Prometheus внутри сети, наружу не нужен.
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -50,6 +61,8 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT_INTERNAL}/${POSTGRES_DB}
+      # Settings общие для всех процессов: Redis migrate не нужен, но URL обязан быть задан.
+      REDIS_URL: redis://redis:6379/0
     command: ["alembic", "upgrade", "head"]
     depends_on:
       db:
@@ -67,6 +80,66 @@ services:
     command: ["python", "/app/webhook_sink.py"]
     volumes:
       - ./scripts/webhook_sink.py:/app/webhook_sink.py:ro
+    networks:
+      - app_network
+
+  # Счётчики rate limit (ADR 0006): живут одно окно, поэтому без персистентности.
+  redis:
+    container_name: payment-processing_redis
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Мониторинг: `docker compose --profile monitoring up`. Prometheus собирает api, consumer и
+  # встроенный exporter RabbitMQ; Grafana поднимается с источником и дашбордом из monitoring/.
+  prometheus:
+    container_name: payment-processing_prometheus
+    profiles: ["monitoring"]
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT_EXTERNAL:-9090}:9090"
+    networks:
+      - app_network
+
+  grafana:
+    container_name: payment-processing_grafana
+    profiles: ["monitoring"]
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      # Локальное демо: дашборд открывается без логина, только на чтение; порт — только localhost.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/payment-processing.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT_EXTERNAL:-3000}:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - app_network
+
+  # Нагрузочный прогон: `docker compose --profile loadtest run --rm k6 run /scripts/payments.js`.
+  k6:
+    profiles: ["loadtest"]
+    image: grafana/k6:1.2.0
+    environment:
+      BASE_URL: http://api:${API_PORT_INTERNAL}
+      API_KEY: ${API_KEY}
+      RATE: ${RATE:-200}
+      DURATION: ${DURATION:-60s}
+    volumes:
+      - ./loadtest:/scripts:ro
     networks:
       - app_network
 

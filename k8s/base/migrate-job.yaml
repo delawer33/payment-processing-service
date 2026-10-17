@@ -1,0 +1,43 @@
+# Схему применяет Job (ADR 0005). api и consumer ждут её в init-контейнере, поэтому всё
+# применяется одним `kubectl apply -k`. Шаблон Job неизменяем: перед выкаткой новой версии
+# старую Job удаляют (`kubectl delete job migrate`), см. README.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: migrate
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+        # Ждёт, пока база примет соединение: иначе попытки Job уходят на «БД ещё не поднялась»,
+        # а backoff между ними растёт до минут.
+        - name: wait-for-db
+          image: payment-processing:local
+          command: ["sh", "-c", "until out=$(alembic current 2>&1); do echo \"waiting for database: $(echo \"$out\" | tail -n 1)\"; sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 96Mi }
+            limits: { memory: 192Mi }
+      containers:
+        - name: migrate
+          image: payment-processing:local
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: payment-processing
+            - secretRef:
+                name: payment-processing
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }

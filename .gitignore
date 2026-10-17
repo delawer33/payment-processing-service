@@ -20,3 +20,4 @@ dist/
 .idea/
 .vscode/
 .claude/settings.local.json
+k8s/overlays/kind/secrets.env

@@ -1,9 +1,66 @@
 """Точка входа API: `uvicorn payment_processing.main:app`."""
 
-from fastapi import APIRouter, Depends, FastAPI
+import time
 
+from fastapi import APIRouter, Depends, FastAPI, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from payment_processing import metrics
 from payment_processing.auth import require_api_key
 from payment_processing.payments.router import router as payments_router
+
+
+def route_template(scope: Scope) -> str:
+    """Путь запроса с параметрами обратно в фигурных скобках: `/payments/{payment_id}`.
+
+    `scope["route"].path` не годится: у маршрута из вложенного роутера там путь без префиксов
+    внешних роутеров.
+    """
+    segments: list[str] = scope["path"].split("/")
+    # Параметры стоят в хвосте пути по порядку: ищем справа налево, чтобы значение, совпавшее с
+    # сегментом префикса (`/api/v1/payments/v1`), не подменило префикс.
+    end = len(segments)
+    for name, value in reversed(scope.get("path_params", {}).items()):
+        for i in range(end - 1, 0, -1):
+            if segments[i] == str(value):
+                segments[i], end = f"{{{name}}}", i
+                break
+    return "/".join(segments)
+
+
+# Метод из запроса — значение клиента; вне списка он сводится к OTHER, чтобы серии не плодились.
+KNOWN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+
+
+class MetricsMiddleware:
+    """Считает запросы и их длительность по шаблону маршрута (`/payments/{payment_id}`)."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        status = 500
+        started = time.perf_counter()
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            # Роутер кладёт найденный маршрут в scope; без него путь — не метка, а мусор сканеров.
+            if "route" in scope and scope["path"] != "/metrics":
+                method = scope["method"] if scope["method"] in KNOWN_METHODS else "OTHER"
+                route = route_template(scope)
+                metrics.HTTP_REQUESTS.labels(method, route, str(status)).inc()
+                metrics.HTTP_DURATION.labels(method, route).observe(time.perf_counter() - started)
 
 
 def create_app() -> FastAPI:
@@ -16,6 +73,14 @@ def create_app() -> FastAPI:
 
     api.include_router(payments_router)
     app.include_router(api)
+
+    # Без ключа: метрики читает Prometheus. Наружу `/metrics` не отдают: Ingress или прокси перед
+    # API пропускают только `/api/`, в compose порт API публикуется только для локального запуска.
+    @app.get("/metrics", include_in_schema=False)
+    def prometheus_metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    app.add_middleware(MetricsMiddleware)
     return app
 
 

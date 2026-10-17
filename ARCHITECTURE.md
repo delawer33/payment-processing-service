@@ -41,9 +41,11 @@
 
 | Файл | Роль |
 |---|---|
-| `main.py` | `create_app()`: монтирует роутеры под `/api/v1` с проверкой ключа |
+| `main.py` | `create_app()`: монтирует роутеры под `/api/v1` с проверкой ключа, `MetricsMiddleware` и `/metrics` |
 | `auth.py` | зависимость `require_api_key`: сравнение `X-API-Key` за постоянное время |
 | `config.py` | `Settings`, вся конфигурация из env |
+| `ratelimit.py` | зависимость `enforce_rate_limit`: фиксированное окно в Redis на API-ключ, 429, fail open (ADR 0006) |
+| `metrics.py` | метрики процесса API: запросы, латентность, исход создания платежа, rate limit |
 | `db.py` | engine, sessionmaker, `Base`, зависимость `get_session` |
 | `gateway.py` | `PaymentGateway` и `EmulatedGateway` (задержка, доля отказов) |
 | `webhooks.py` | подпись HMAC, тело webhook, `deliver`, `WebhookDeliveryError` |
@@ -56,10 +58,15 @@
 | `messaging/schemas.py` | сообщение `PaymentCreated` |
 | `messaging/topology.py` | обменник, три очереди, `MAX_ATTEMPTS`, заголовок попытки |
 | `consumer/handler.py` | `process_payment`: шлюз, фиксация статуса, webhook |
-| `consumer/app.py` | FastStream-приложение: подписчик, retry/DLQ, запуск relay |
+| `consumer/app.py` | FastStream-приложение: подписчик, retry/DLQ, запуск relay, `/metrics` на `CONSUMER_METRICS_PORT` |
+| `consumer/metrics.py` | метрики процесса consumer: шлюз, webhook, исходы сообщений, outbox |
+
+Метрики разделены по процессам, чтобы каждый экспортировал только свои серии.
 
 Вне пакета: `migrations/versions/0001_payments_outbox.py` (схема, триггер),
-`scripts/webhook_sink.py` (приёмник webhook для демо), `docker-compose.yml`, `Dockerfile`.
+`scripts/webhook_sink.py` (приёмник webhook для демо), `docker-compose.yml`, `Dockerfile`,
+`monitoring/` (Prometheus, провижининг и дашборд Grafana), `k8s/` (kustomize: base и overlay
+`kind`), `loadtest/payments.js` (сценарий k6).
 
 ## Инварианты
 

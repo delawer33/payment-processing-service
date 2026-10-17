@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  # Без replicas: числом подов владеет HPA ниже, иначе каждый apply сбрасывал бы его к 2.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+        # Ждёт, пока Job migrate доведёт схему до head; сам миграции не применяет (ADR 0005).
+        # Схема новее образа (откат приложения после миграции) тоже не пройдёт: alembic не знает
+        # ревизию, и её ошибка видна в логе init-контейнера.
+        - name: wait-for-schema
+          image: payment-processing:local
+          command: ["sh", "-c", "until out=$(alembic current 2>&1) && echo \"$out\" | grep -q '(head)'; do echo \"waiting for schema: $(echo \"$out\" | tail -n 1)\"; sleep 2; done"]
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          resources:
+            requests: { cpu: 10m, memory: 96Mi }
+            limits: { memory: 192Mi }
+      containers:
+        - name: api
+          image: payment-processing:local
+          ports:
+            - { name: http, containerPort: 8000 }
+          envFrom:
+            - configMapRef: { name: payment-processing }
+            - secretRef: { name: payment-processing }
+          # /health под ключом, как и весь /api/v1: проба берёт ключ из окружения контейнера.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "curl -fs -H \"X-API-Key: $API_KEY\" localhost:8000/api/v1/health"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "curl -fs -H \"X-API-Key: $API_KEY\" localhost:8000/api/v1/health"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 250m, memory: 192Mi }
+            limits: { memory: 384Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app.kubernetes.io/name: api
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+# API упирается в одно ядро на под (uvicorn, один процесс): масштабируется числом подов.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api }
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api

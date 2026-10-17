@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from faststream.rabbit import RabbitBroker, RabbitMessage, TestRabbitBroker
+from prometheus_client import REGISTRY
 
 from payment_processing.messaging.topology import EXCHANGE, NEW_QUEUE, RETRY_QUEUE
 
@@ -151,3 +152,26 @@ async def test_retry_publish_failure_nacks_message_with_requeue(
     spy_message["nack"].assert_awaited_once_with(requeue=True)
     spy_message["ack"].assert_not_awaited()
     spy_message["reject"].assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("attempt", "side_effect", "outcome"),
+    [(None, None, "acked"), (0, RuntimeError, "retried"), (2, RuntimeError, "dead_lettered")],
+)
+async def test_message_outcomes_are_counted(
+    test_broker: RabbitBroker,
+    consumer_app: ModuleType,
+    republish: AsyncMock,
+    spy_message: dict[str, AsyncMock],
+    monkeypatch: pytest.MonkeyPatch,
+    attempt: int | None,
+    side_effect: type[Exception] | None,
+    outcome: str,
+) -> None:
+    labels = {"outcome": outcome}
+    before = REGISTRY.get_sample_value("consumer_messages_total", labels) or 0.0
+    monkeypatch.setattr(consumer_app, "process_payment", AsyncMock(side_effect=side_effect))
+
+    await _deliver(test_broker, attempt)
+
+    assert REGISTRY.get_sample_value("consumer_messages_total", labels) == before + 1
