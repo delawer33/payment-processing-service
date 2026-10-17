@@ -4,6 +4,7 @@ import json
 import uuid
 
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -132,3 +133,40 @@ async def test_relay_skips_unknown_event_type_and_publishes_the_rest(
     assert [m for _, _, m in publisher.sent] == ["1", "3"]
     assert await _published_flags(sessionmaker) == [True, False, True]
     assert "payment.unknown" in caplog.text
+
+
+async def test_relay_counts_published_events(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    before = REGISTRY.get_sample_value("outbox_published_total") or 0.0
+    await _add_events(sessionmaker, 3)
+
+    async with sessionmaker() as session:
+        await relay_once(session, FakePublisher(), batch_size=BATCH)
+
+    assert REGISTRY.get_sample_value("outbox_published_total") == before + 3
+
+
+async def test_oldest_unpublished_age_reflects_waiting_event(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    await _add_events(sessionmaker, 1)
+    async with sessionmaker() as session:
+        await session.execute(text("UPDATE outbox SET created_at = now() - interval '30 seconds'"))
+        await session.commit()
+
+    async with sessionmaker() as session:
+        await relay.refresh_oldest_unpublished_age(session)
+
+    age = REGISTRY.get_sample_value("outbox_oldest_unpublished_age_seconds")
+    assert age is not None
+    assert 30 <= age < 60
+
+
+async def test_oldest_unpublished_age_is_zero_for_empty_outbox(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    async with sessionmaker() as session:
+        await relay.refresh_oldest_unpublished_age(session)
+
+    assert REGISTRY.get_sample_value("outbox_oldest_unpublished_age_seconds") == 0

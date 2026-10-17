@@ -9,9 +9,11 @@ import httpx
 from faststream import FastStream
 from faststream.middlewares import AckPolicy
 from faststream.rabbit import Channel, RabbitBroker, RabbitMessage
+from prometheus_client import start_http_server
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payment_processing.config import get_settings
+from payment_processing.consumer import metrics
 from payment_processing.consumer.handler import process_payment
 from payment_processing.db import get_sessionmaker
 from payment_processing.gateway import EmulatedGateway, PaymentGateway
@@ -90,9 +92,11 @@ async def _retry_or_dead_letter(msg: RabbitMessage, payment_id: uuid.UUID, attem
             content_type="application/json",
         )
         await msg.ack()
+        metrics.CONSUMER_MESSAGES.labels("retried").inc()
         logger.info("payment %s attempt %d: retry in %.1fs", payment_id, attempt, delay)
     else:
         await msg.reject(requeue=False)
+        metrics.CONSUMER_MESSAGES.labels("dead_lettered").inc()
         logger.error("payment %s attempt %d: sent to dlq", payment_id, attempt)
 
 
@@ -118,14 +122,18 @@ async def handle_payment_created(message: PaymentCreated, msg: RabbitMessage) ->
             # очередь, попытка не засчитывается.
             logger.exception("payment %s attempt %d: retry failed, requeued", payment_id, attempt)
             await msg.nack(requeue=True)
+            metrics.CONSUMER_MESSAGES.labels("requeued").inc()
         return
     await msg.ack()
+    metrics.CONSUMER_MESSAGES.labels("acked").inc()
     logger.info("payment %s attempt %d: acked", payment_id, attempt)
 
 
 @app.after_startup
 async def start() -> None:
     global _relay_task, _deps
+    # Отдельный поток с HTTP-сервером `/metrics`; живёт, пока жив процесс.
+    start_http_server(settings.consumer_metrics_port)
     _deps = Dependencies(
         sessionmaker=get_sessionmaker(),
         gateway=EmulatedGateway.from_settings(),

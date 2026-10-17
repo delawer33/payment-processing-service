@@ -9,6 +9,7 @@ from decimal import Decimal
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from payment_processing.config import get_settings
@@ -273,3 +274,29 @@ async def test_unknown_payment_is_acked_without_error(
 
     assert gateway.calls == 0
     assert receiver.requests == []
+
+
+def metric(name: str, **labels: str) -> float:
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+async def test_outcomes_are_counted_in_metrics(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    before_failed = metric("payments_finalised_total", status="failed")
+    before_webhook = metric("webhook_deliveries_total", result="failed")
+    before_charges = metric("gateway_charge_duration_seconds_count")
+    payment_id = await _add_payment(sessionmaker)
+    gateway = FakeGateway(GatewayResult(approved=False, reason="declined by issuer"))
+
+    with pytest.raises(WebhookDeliveryError):
+        await process_payment(
+            payment_id,
+            sessionmaker=sessionmaker,
+            gateway=gateway,
+            http=WebhookReceiver(status_code=500).client,
+        )
+
+    assert metric("payments_finalised_total", status="failed") == before_failed + 1
+    assert metric("webhook_deliveries_total", result="failed") == before_webhook + 1
+    assert metric("gateway_charge_duration_seconds_count") == before_charges + 1

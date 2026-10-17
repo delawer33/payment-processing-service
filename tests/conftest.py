@@ -8,13 +8,16 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.community.redis import RedisContainer
 
 from payment_processing.config import get_settings
 from payment_processing.db import get_engine, get_sessionmaker
 from payment_processing.main import create_app
+from payment_processing.ratelimit import get_redis
 
 API_KEY = "test-api-key"
 
@@ -23,13 +26,21 @@ def _clear_caches() -> None:
     get_settings.cache_clear()
     get_engine.cache_clear()
     get_sessionmaker.cache_clear()
+    get_redis.cache_clear()
 
 
 @pytest.fixture(scope="session")
-def database_url() -> Iterator[str]:
+def redis_url() -> Iterator[str]:
+    with RedisContainer("redis:7-alpine") as rd:
+        yield f"redis://{rd.get_container_host_ip()}:{rd.get_exposed_port(6379)}/0"
+
+
+@pytest.fixture(scope="session")
+def database_url(redis_url: str) -> Iterator[str]:
     with PostgresContainer("postgres:16-alpine", driver="asyncpg") as pg:
         url = pg.get_connection_url()
         os.environ["DATABASE_URL"] = url
+        os.environ["REDIS_URL"] = redis_url
         os.environ["RABBITMQ_URL"] = "amqp://guest:guest@localhost:5672/"
         os.environ["API_KEY"] = API_KEY
         _clear_caches()
@@ -50,7 +61,15 @@ async def engine(database_url: str) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture
-def app(engine: AsyncEngine) -> FastAPI:
+async def redis(engine: AsyncEngine) -> AsyncIterator[Redis]:
+    client = get_redis()
+    await client.flushdb()
+    yield client
+    await client.aclose()
+
+
+@pytest.fixture
+def app(redis: Redis) -> FastAPI:
     return create_app()
 
 
