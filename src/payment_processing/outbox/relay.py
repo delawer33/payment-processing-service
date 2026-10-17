@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from payment_processing.config import get_settings
@@ -68,10 +69,11 @@ async def relay_once(session: AsyncSession, publisher: Publisher, *, batch_size:
 async def refresh_oldest_unpublished_age(session: AsyncSession) -> None:
     """Обновляет метрику возраста самого старого неопубликованного события.
 
-    Растущий возраст значит, что relay не успевает или не может достучаться до брокера.
+    Растущий возраст значит, что relay не успевает или не может достучаться до брокера. События
+    неизвестного типа relay не публикует никогда, они ждут ручного разбора и в возраст не входят.
     """
     stmt = select(func.extract("epoch", func.now() - func.min(OutboxEvent.created_at))).where(
-        OutboxEvent.published_at.is_(None)
+        OutboxEvent.published_at.is_(None), OutboxEvent.event_type.in_(ROUTING_KEYS)
     )
     age = (await session.execute(stmt)).scalar_one()
     metrics.OUTBOX_OLDEST_AGE.set(float(age or 0))
@@ -90,8 +92,13 @@ async def run_relay(
         try:
             async with sessionmaker() as session:
                 published = await relay_once(session, publisher, batch_size=batch_size)
-                await refresh_oldest_unpublished_age(session)
         except Exception:
             logger.exception("outbox relay batch failed, will retry")
+        # Отдельно от пачки: при недоступном брокере возраст и должен расти.
+        try:
+            async with sessionmaker() as session:
+                await refresh_oldest_unpublished_age(session)
+        except SQLAlchemyError:
+            logger.exception("outbox age refresh failed")
         if published < batch_size:
             await asyncio.sleep(interval)

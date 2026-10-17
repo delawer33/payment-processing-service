@@ -65,7 +65,7 @@ async def redis(engine: AsyncEngine) -> AsyncIterator[Redis]:
     client = get_redis()
     await client.flushdb()
     yield client
-    await client.aclose()
+    await client.aclose(close_connection_pool=True)
 
 
 @pytest.fixture

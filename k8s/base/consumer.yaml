@@ -27,7 +27,7 @@ spec:
       initContainers:
         - name: wait-for-schema
           image: payment-processing:local
-          command: ["sh", "-c", "until alembic current 2>/dev/null | grep -q '(head)'; do echo waiting for schema; sleep 2; done"]
+          command: ["sh", "-c", "until out=$(alembic current 2>&1) && echo \"$out\" | grep -q '(head)'; do echo \"waiting for schema: $(echo \"$out\" | tail -n 1)\"; sleep 2; done"]
           envFrom:
             - configMapRef: { name: payment-processing }
             - secretRef: { name: payment-processing }
@@ -43,8 +43,13 @@ spec:
           envFrom:
             - configMapRef: { name: payment-processing }
             - secretRef: { name: payment-processing }
+          env:
+            # Соединение на каждое сообщение в работе (CONSUMER_PREFETCH) плюс relay; без overflow.
+            - { name: DB_POOL_SIZE, value: "12" }
+            - { name: DB_MAX_OVERFLOW, value: "0" }
           # Сервер метрик поднимается в after_startup, после подключения к брокеру: отвечает —
-          # значит, процесс стартовал.
+          # значит, процесс стартовал. Он живёт в своём потоке, поэтому зависший event loop или
+          # потерянное соединение с брокером проба не видит; это видно по метрикам очередей.
           readinessProbe:
             httpGet: { path: /metrics, port: metrics }
             periodSeconds: 10

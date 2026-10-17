@@ -6,9 +6,10 @@ import uuid
 import pytest
 from fastapi import FastAPI
 from httpx import AsyncClient
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
-from payment_processing.config import get_settings
+from payment_processing.config import Settings, get_settings
 from payment_processing.ratelimit import get_redis, hit
 
 BODY = {
@@ -64,6 +65,8 @@ async def test_api_answers_429_with_retry_after(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(get_settings(), "rate_limit_requests", 2)
+    # Длинное окно: три запроса не должны разойтись по двум окнам на границе секунды.
+    monkeypatch.setattr(get_settings(), "rate_limit_window", 3600)
 
     statuses = []
     for _ in range(3):
@@ -74,13 +77,14 @@ async def test_api_answers_429_with_retry_after(
 
     assert statuses == [202, 202, 429]
     assert int(response.headers["Retry-After"]) >= 1
-    assert response.json() == {"detail": "rate limit of 2 requests per 1s exceeded"}
+    assert response.json() == {"detail": "rate limit of 2 requests per 3600s exceeded"}
 
 
 async def test_api_reports_remaining_quota(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(get_settings(), "rate_limit_requests", 5)
+    monkeypatch.setattr(get_settings(), "rate_limit_window", 3600)
 
     response = await client.post(
         "/api/v1/payments", json=BODY, headers={"Idempotency-Key": str(uuid.uuid4())}
@@ -103,3 +107,9 @@ async def test_unreachable_redis_lets_requests_through(app: FastAPI, client: Asy
     await unreachable.aclose()
     assert response.status_code == 202
     assert "X-RateLimit-Remaining" not in response.headers
+
+
+@pytest.mark.parametrize("field", ["rate_limit_requests", "rate_limit_window"])
+def test_non_positive_rate_limit_settings_fail_at_startup(database_url: str, field: str) -> None:
+    with pytest.raises(ValidationError, match=field):
+        Settings(**{field: 0})  # type: ignore[arg-type]

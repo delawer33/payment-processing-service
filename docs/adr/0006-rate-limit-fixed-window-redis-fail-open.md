@@ -14,7 +14,8 @@ date: 2026-10-17
 Решение: на запросы `/api/v1/payments` действует лимит `RATE_LIMIT_REQUESTS` за
 `RATE_LIMIT_WINDOW` секунд на API-ключ. Счётчик — ключ `ratelimit:<sha256(api_key)[:16]>:<окно>`,
 `INCR` и `EXPIRE NX` в одной транзакции `MULTI`. Сверх лимита — `429` с `Retry-After` до конца
-окна; в пределах лимита — `X-RateLimit-Limit` и `X-RateLimit-Remaining`. Ошибка Redis
+окна; успешный ответ в пределах лимита несёт `X-RateLimit-Limit` и `X-RateLimit-Remaining`
+(ответы-ошибки 4xx их не несут: FastAPI собирает их заново из исключения). Ошибка Redis
 (недоступен, таймаут `REDIS_TIMEOUT`, нет свободного соединения в пуле) — запрос пропускается без
 лимита, пишется предупреждение и растёт `rate_limit_backend_errors_total`.
 

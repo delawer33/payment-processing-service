@@ -7,6 +7,7 @@ Business code never branches on the environment name.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,8 +29,8 @@ class Settings(BaseSettings):
     # Соединений с Redis на процесс; запросы сверх ждут свободное до `redis_timeout`.
     redis_max_connections: int = 50
     # Сколько запросов один API-ключ может сделать за окно `rate_limit_window` секунд.
-    rate_limit_requests: int = 100
-    rate_limit_window: int = 1
+    rate_limit_requests: PositiveInt = 100
+    rate_limit_window: PositiveInt = 1
     outbox_poll_interval: float = 0.5
     outbox_batch_size: int = 100
     # Static key clients send in `X-API-Key`; no default so an unset key cannot open the API.

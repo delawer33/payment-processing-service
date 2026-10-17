@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: api
 spec:
-  replicas: 2
+  # Без replicas: числом подов владеет HPA ниже, иначе каждый apply сбрасывал бы его к 2.
   selector:
     matchLabels:
       app.kubernetes.io/name: api
@@ -23,9 +23,11 @@ spec:
         runAsUser: 1000
       initContainers:
         # Ждёт, пока Job migrate доведёт схему до head; сам миграции не применяет (ADR 0005).
+        # Схема новее образа (откат приложения после миграции) тоже не пройдёт: alembic не знает
+        # ревизию, и её ошибка видна в логе init-контейнера.
         - name: wait-for-schema
           image: payment-processing:local
-          command: ["sh", "-c", "until alembic current 2>/dev/null | grep -q '(head)'; do echo waiting for schema; sleep 2; done"]
+          command: ["sh", "-c", "until out=$(alembic current 2>&1) && echo \"$out\" | grep -q '(head)'; do echo \"waiting for schema: $(echo \"$out\" | tail -n 1)\"; sleep 2; done"]
           envFrom:
             - configMapRef: { name: payment-processing }
             - secretRef: { name: payment-processing }

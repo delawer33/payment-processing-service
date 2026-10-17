@@ -24,8 +24,11 @@ spec:
             - { name: amqp, containerPort: 5672 }
             - { name: management, containerPort: 15672 }
             - { name: metrics, containerPort: 15692 }
-          envFrom:
-            - secretRef: { name: payment-processing }
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom: { secretKeyRef: { name: payment-processing, key: RABBITMQ_DEFAULT_USER } }
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom: { secretKeyRef: { name: payment-processing, key: RABBITMQ_DEFAULT_PASS } }
           readinessProbe:
             exec:
               command: ["rabbitmq-diagnostics", "-q", "check_running"]

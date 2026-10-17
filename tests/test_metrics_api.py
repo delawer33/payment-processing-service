@@ -64,3 +64,24 @@ async def test_payment_creation_outcomes_are_counted(client: AsyncClient) -> Non
     assert metric("payments_accepted_total", result="created") == before["created"] + 1
     assert metric("payments_accepted_total", result="replayed") == before["replayed"] + 1
     assert metric("payments_accepted_total", result="conflict") >= 1
+
+
+async def test_path_param_matching_a_prefix_segment_keeps_route_template(
+    client: AsyncClient,
+) -> None:
+    labels = {"method": "GET", "route": "/api/v1/payments/{payment_id}", "status": "422"}
+    before = metric("http_requests_total", **labels)
+
+    await client.get("/api/v1/payments/v1")
+
+    assert metric("http_requests_total", **labels) == before + 1
+
+
+async def test_unknown_http_method_is_labelled_other(client: AsyncClient) -> None:
+    labels = {"method": "OTHER", "route": "/api/v1/health", "status": "405"}
+    before = metric("http_requests_total", **labels)
+
+    await client.request("FOOBAR", "/api/v1/health")
+
+    assert metric("http_requests_total", **labels) == before + 1
+    assert metric("http_requests_total", method="FOOBAR", route="/api/v1/health", status="405") == 0
